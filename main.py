@@ -10,8 +10,16 @@ df = pd.read_csv('/Users/crystalli/Documents/Senior/AmazonPTA/DataFile.csv')
 # Grab model features/inputs and target/output
 numerical_features = ["ASIN_STATIC_ITEM_PACKAGE_WEIGHT",
                       "ASIN_STATIC_LIST_PRICE"]
+categorical_features = ['ASIN_STATIC_GL_PRODUCT_GROUP_TYPE',
+               'ASIN_STATIC_BATTERIES_INCLUDED',
+               'ASIN_STATIC_BATTERIES_REQUIRED',
+               'ASIN_STATIC_ITEM_CLASSIFICATION']
 
-model_features = numerical_features
+text_features = ['ASIN_STATIC_ITEM_NAME',
+                 'ASIN_STATIC_PRODUCT_DESCRIPTION']
+
+model_features = numerical_features + categorical_features + text_features
+
 model_target = 'target_label'
 
 # Data Cleansing: Cleaning numerical features
@@ -27,38 +35,136 @@ df[numerical_features[1]].value_counts(bins=10, sort=False)
 # Check Missing Value
 print(df[numerical_features].isna().sum())
 
+# Cleaning categorical features:
+for c in categorical_features:
+    print(c)
+    print(df[c].unique()) #value_counts())
+
+mask = df.applymap(type) != bool
+do = {True: 'TRUE', False: 'FALSE'}
+df_masked = df.where(mask, df.replace(do))
+
+df[categorical_features + text_features] = df[categorical_features + text_features].astype('str')
+
+# Cleaning text features:
+# Prepare cleaning functions
+import re, string
+import nltk
+from nltk.stem import SnowballStemmer
+
+stop_words = ["a", "an", "the", "this", "that", "is", "it", "to", "and"]
+
+stemmer = SnowballStemmer('english')
+
+
+def preProcessText(text):
+    # lowercase and strip leading/trailing white space
+    text = text.lower().strip()
+
+    # remove HTML tags
+    text = re.compile('<.*?>').sub('', text)
+
+    # remove punctuation
+    text = re.compile('[%s]' % re.escape(string.punctuation)).sub(' ', text)
+
+    # remove extra white space
+    text = re.sub('\s+', ' ', text)
+
+    return text
+
+
+def lexiconProcess(text, stop_words, stemmer):
+    filtered_sentence = []
+    words = text.split(" ")
+    for w in words:
+        if w not in stop_words:
+            filtered_sentence.append(stemmer.stem(w))
+    text = " ".join(filtered_sentence)
+
+    return text
+
+
+def cleanSentence(text, stop_words, stemmer):
+    return lexiconProcess(preProcessText(text), stop_words, stemmer)
+
+# Clean the text features
+for c in text_features:
+    print('Text cleaning: ', c)
+    df[c] = [cleanSentence(item, stop_words, stemmer) for item in df[c].values]
+
 # Train Dataset
 from sklearn.model_selection import train_test_split
 
-training_data, test_data = train_test_split(df, test_size=0.2, shuffle=True, random_state=23)
-train_data, val_data = train_test_split(training_data, test_size=0.15, shuffle=True, random_state=23)
+train_data, test_data = train_test_split(df, test_size=0.1, shuffle=True, random_state=23)
 
-# Print the shapes of the Train - Validation - Test Datasets
-print('Train - Validation - Test Datasets shapes: ', train_data.shape, val_data.shape, test_data.shape)
-
-# Data Processing with Pipeline
 from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
+from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.compose import ColumnTransformer
 
+### COLUMN_TRANSFORMER ###
+##########################
+
+# Preprocess the numerical features
+numerical_processor = Pipeline([
+    ('num_imputer', SimpleImputer(strategy='mean')),
+    ('num_scaler', MinMaxScaler())  # Shown in case is needed, not a must with Decision Trees
+])
+
+# Preprocess the categorical features
+categorical_processor = Pipeline([
+    ('cat_imputer', SimpleImputer(strategy='constant', fill_value='missing')),
+    # Shown in case is needed, no effect here as we already imputed with 'nan' strings
+    ('cat_encoder', OneHotEncoder(handle_unknown='ignore'))
+    # handle_unknown tells it to ignore (rather than throw an error for) any value that was not present in the initial training set.
+])
+
+# Preprocess 1st text feature
+text_processor_0 = Pipeline([
+    ('text_vectorizer_0', CountVectorizer(binary=True, max_features=50))
+])
+
+# Preprocess 2nd text feature (larger vocabulary)
+text_processor_1 = Pipeline([
+    ('text_vectorizer_1', CountVectorizer(binary=True, max_features=150))
+])
+
+# Combine all data preprocessors from above (add more, if you choose to define more!)
+# For each processor/step specify: a name, the actual process, and finally the features to be processed
+data_processor = ColumnTransformer([
+    ('numerical_processing', numerical_processor, numerical_features),
+    ('categorical_processing', categorical_processor, categorical_features),
+    ('text_processing_0', text_processor_0, text_features[0]),
+    ('text_processing_1', text_processor_1, text_features[1])
+])
+
+# Visualize the data processing pipeline
+from sklearn import set_config
+
+set_config(display='diagram')
+print(data_processor)
+
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.pipeline import Pipeline
 
 ### PIPELINE ###
 ################
 
-# Pipeline desired data transformers, along with an estimator at the end
-# For each step specify: a name, the actual transformer/estimator with its parameters
-classifier = Pipeline([
-    ('imputer', SimpleImputer(strategy='mean')),
-    ('estimator', GradientBoostingClassifier(learning_rate=0.15, n_estimators=500, max_depth=3))
-])
+# Pipeline desired all data transformers, along with an estimator at the end
+# Later you can set/reach the parameters using the names issued - for hyperparameter tuning, for example
+pipeline = Pipeline([
+    ('data_processing', data_processor),
+    ('dt', GradientBoostingClassifier(max_depth=1, n_estimators=250, learning_rate=1.5, random_state=23))
+                    ])
 
 # Visualize the pipeline
 # This will come in handy especially when building more complex pipelines, stringing together multiple preprocessing steps
 from sklearn import set_config
 set_config(display='diagram')
-print(classifier)
+print(pipeline)
 
-# Train and Tune a Classifier
+
 # Get train data to train the classifier
 X_train = train_data[model_features]
 y_train = train_data[model_target]
@@ -67,7 +173,8 @@ y_train = train_data[model_target]
 # Train data going through the Pipeline it's imputed (with means from the train data),
 #   scaled (with the min/max from the train data),
 #   and finally used to fit the model
-classifier.fit(X_train, y_train)
+pipeline.fit(X_train, y_train)
+
 
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 
@@ -75,7 +182,7 @@ from sklearn.metrics import confusion_matrix, classification_report, accuracy_sc
 # Train data going through the Pipeline it's imputed (with means from the train data),
 # scaled (with the min/max from the train data),
 # and finally used to make predictions
-train_predictions = classifier.predict(X_train)
+train_predictions = pipeline.predict(X_train)
 
 print('Model performance on the train set:')
 print(confusion_matrix(y_train, train_predictions))
@@ -85,16 +192,16 @@ print("Train accuracy:", accuracy_score(y_train, train_predictions))
 from sklearn.metrics import confusion_matrix, classification_report, accuracy_score
 
 # Get validation data to validate the classifier
-X_val = val_data[model_features]
-y_val = val_data[model_target]
+X_test = test_data[model_features]
+y_test = test_data[model_target]
 
-# Use the fitted model to make predictions on the validation dataset
-# Validation data going through the Pipeline it's imputed (with means from the train data),
+# Use the fitted model to make predictions on the test dataset
+# Test data going through the Pipeline it's imputed (with means from the train data),
 #   scaled (with the min/max from the train data),
 #   and finally used to make predictions
-val_predictions = classifier.predict(X_val)
+test_predictions = pipeline.predict(X_test)
 
-print('Model performance on the validation set:')
-print(confusion_matrix(y_val, val_predictions))
-print(classification_report(y_val, val_predictions))
-print("Validation accuracy:", accuracy_score(y_val, val_predictions))
+print('Model performance on the test set:')
+print(confusion_matrix(y_test, test_predictions))
+print(classification_report(y_test, test_predictions))
+print("Test accuracy:", accuracy_score(y_test, test_predictions))
